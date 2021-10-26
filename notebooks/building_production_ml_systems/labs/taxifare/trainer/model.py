@@ -1,7 +1,9 @@
 import datetime
 import logging
 import os
+import shutil
 
+import hypertune
 import numpy as np
 import tensorflow as tf
 from tensorflow import feature_column as fc
@@ -39,6 +41,7 @@ def load_dataset(pattern, batch_size, num_repeat):
         column_names=CSV_COLUMNS,
         column_defaults=DEFAULTS,
         num_epochs=num_repeat,
+        shuffle_buffer_size=1000000,
     )
     return dataset.map(features_and_labels)
 
@@ -153,6 +156,7 @@ def rmse(y_true, y_pred):
 
 
 def build_dnn_model(nbuckets, nnsize, lr):
+    # input layer is all float except for pickup_datetime which is a string
     STRING_COLS = ["pickup_datetime"]
     NUMERIC_COLS = set(CSV_COLUMNS) - {LABEL_COLUMN, "key"} - set(STRING_COLS)
     inputs = {
@@ -184,20 +188,34 @@ def build_dnn_model(nbuckets, nnsize, lr):
     return model
 
 
+# TODO 1
+hpt =  hypertune.HyperTune()
+
+
+# Reporting callback
+# TODO 1
+class HPTCallback(tf.keras.callbacks.Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        global hpt
+        hpt.report_hyperparameter_tuning_metric(
+            hyperparameter_metric_tag="val_rmse",
+            metric_value=logs["val_rmse"],
+            global_step=epoch,
+        )
+
+
 def train_and_evaluate(hparams):
     batch_size = hparams["batch_size"]
     nbuckets = hparams["nbuckets"]
     lr = hparams["lr"]
-    nnsize = hparams["nnsize"]
+    nnsize = [int(s) for s in hparams["nnsize"].split()]
     eval_data_path = hparams["eval_data_path"]
     num_evals = hparams["num_evals"]
     num_examples_to_train_on = hparams["num_examples_to_train_on"]
     output_dir = hparams["output_dir"]
     train_data_path = hparams["train_data_path"]
 
-    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    savedmodel_dir = os.path.join(output_dir, "export/savedmodel")
-    model_export_path = os.path.join(savedmodel_dir, timestamp)
+    model_export_path = os.path.join(output_dir, "savedmodel")
     checkpoint_path = os.path.join(output_dir, "checkpoints")
     tensorboard_path = os.path.join(output_dir, "tensorboard")
 
@@ -215,7 +233,7 @@ def train_and_evaluate(hparams):
     checkpoint_cb = callbacks.ModelCheckpoint(
         checkpoint_path, save_weights_only=True, verbose=1
     )
-    tensorboard_cb = callbacks.TensorBoard(tensorboard_path)
+    tensorboard_cb = callbacks.TensorBoard(tensorboard_path, histogram_freq=1)
 
     history = model.fit(
         trainds,
@@ -223,9 +241,9 @@ def train_and_evaluate(hparams):
         epochs=num_evals,
         steps_per_epoch=max(1, steps_per_epoch),
         verbose=2,  # 0=silent, 1=progress bar, 2=one line per epoch
-        callbacks=[checkpoint_cb, tensorboard_cb],
+        callbacks=[checkpoint_cb, tensorboard_cb, HPTCallback()],
     )
 
     # Exporting the model with default serving function.
-    model.save(model_export_path)
+    tf.saved_model.save(model, model_export_path)
     return history
